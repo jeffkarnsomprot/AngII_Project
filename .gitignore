@@ -1,4 +1,4 @@
-# JWN additions
+# JK additions
 
 ## DS Store
 
@@ -23,6 +23,8 @@
 # User-specific files
 .Ruserdata
 
+# Excel File 
+.xlsx
 
 # Example code in package build process
 *-Ex.R
