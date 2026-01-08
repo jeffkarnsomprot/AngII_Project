@@ -1,0 +1,418 @@
+---
+title: "filtered_and_raw_1"
+author: "Deshan Weeraratne"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+    theme: bootstrap
+    df_print: paged
+    code_folding: hide
+    highlight: pygments
+  pdf_document:
+    toc: true
+    toc_depth: '3'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load libraries
+
+```{r, echo=TRUE, warning=FALSE, error=FALSE, message=FALSE}
+
+# Loading all my necessary packages
+library(Seurat)
+library(Matrix)
+library(here)
+library(dplyr)
+library(cowplot)
+library(ggplot2)
+library(plotly) 
+library(DoubletFinder)
+```
+
+# Load datasets
+```{r echo=TRUE, error=FALSE, message=FALSE, warning=FALSE}
+# Define paths and keep them separate
+filtered_path <- here("datasets_raw", "1_filtered_feature_bc_matrix.h5")
+raw_path <- here("datasets_raw", "1_raw_feature_bc_matrix.h5")
+
+# Read in the data
+filtered_data <- Read10X_h5(filtered_path)
+raw_data <- Read10X_h5(raw_path)
+
+# Create Seurat objects
+filtered_1 <- CreateSeuratObject(
+  counts = filtered_data,
+  project = "filtered_1"
+)
+
+raw_1 <- CreateSeuratObject(
+  counts = raw_data,
+  project = "raw_1"
+)
+```
+
+
+# Quality control for raw data
+```{r qc_raw_before, echo=TRUE, warning=FALSE, error=FALSE, message=FALSE, fig.height=5, fig.width=12}
+
+# Cell count (for reporting)
+Start_raw <- ncol(raw_1)
+
+# QC violin plots (raw data)
+VlnPlot(
+  raw_1,
+  features = c("nFeature_RNA", "nCount_RNA"),
+  ncol = 2,
+  pt.size = 0
+)
+
+# Note: QC of the raw dataset revealed that the majority of barcodes had near-zero gene and UMI counts, consistent with empty droplets, motivating downstream filtering. No downstream clustering was performed on the raw dataset, as it primarily serves to demonstrate the necessity of filtering empty droplets.
+```
+
+
+# Quality control on filtered data
+```{r qc_filtered_before, echo=TRUE, warning=FALSE, error=FALSE, message=FALSE, fig.height=10, fig.width=10}
+
+# Cell count before QC filtering
+Start_filtered <- ncol(filtered_1)
+
+# QC violin plots
+VlnPlot(
+  filtered_1,
+  features = c("nFeature_RNA", "nCount_RNA"),
+  ncol = 2,
+  pt.size = 0
+)
+
+# Note: Mitochondrial content could not be assessed because mitochondrial genes were not annotated in the reference used for this dataset.
+```
+
+
+# QC filtering based on gene and UMI complexity
+```{r qc_filtering, echo=TRUE, warning=FALSE, error=FALSE, message=FALSE}
+filtered_1 <- subset(
+  filtered_1,
+  subset =
+    nFeature_RNA > 200 &
+    nFeature_RNA < 6000 &
+    nCount_RNA < 50000
+)
+```
+
+
+# QC on filtered data after filtering
+```{r qc_filtered_after, echo=TRUE, warning=FALSE, error=FALSE, message=FALSE, fig.height=10, fig.width=10}
+After_filtered <- ncol(filtered_1)
+
+VlnPlot(
+  filtered_1,
+  features = c("nFeature_RNA", "nCount_RNA"),
+  ncol = 2,
+  pt.size = 0
+)
+```
+
+# Cell counts table
+```{r qc_cell_counts, echo=TRUE, warning=FALSE, error=FALSE, message=FALSE}
+cells_removed <- Start_filtered - After_filtered
+
+cell_counts <- data.frame(
+  Phase = c("Before Filtering", "After Filtering", "Cells Filtered Out"),
+  Cell_Number = c(Start_filtered, After_filtered, cells_removed)
+)
+
+cell_counts
+```
+
+
+# Normalization
+```{r doublet_prep, echo=TRUE, warning=FALSE, error=FALSE, message=FALSE}
+# Normalize data (temporary, for doublet detection only)
+filtered_1 <- NormalizeData(filtered_1)
+
+# Identify variable features
+filtered_1 <- FindVariableFeatures(filtered_1)
+
+# Scale data
+filtered_1 <- ScaleData(filtered_1)
+
+# Run PCA
+filtered_1 <- RunPCA(filtered_1)
+
+# Visualize PCA to confirm it ran
+ElbowPlot(filtered_1)
+
+# Note: Normalization and PCA were performed at this stage to construct a neighborhood graph required for doublet detection. No sharp elbow was observed, indicating that biological variation is distributed across multiple components; therefore, the first 20 PCs were retained to construct the neighborhood graph required for doublet detection.
+```
+
+
+# Neighbor graph and preliminary clustering for doublet detection
+```{r doublet_neighbors, echo=TRUE, warning=FALSE, error=FALSE, message=FALSE}
+
+# Construct neighbor graph using PCA space
+filtered_1 <- FindNeighbors(filtered_1, dims = 1:20)
+
+# Low-resolution clustering (used only for doublet detection)
+filtered_1 <- FindClusters(filtered_1, resolution = 0.5)
+```
+
+
+# DoubletFinder parameter sweep and classification
+```{r doublet_finder, echo=TRUE, warning=FALSE, error=FALSE, message=FALSE}
+
+# Parameter sweep to identify optimal pK
+sweep.res <- paramSweep(filtered_1, PCs = 1:20, sct = FALSE)
+sweep.stats <- summarizeSweep(sweep.res, GT = FALSE)
+bcmvn <- find.pK(sweep.stats)
+
+# Convert pK to numeric for plotting
+bcmvn$pK <- as.numeric(as.character(bcmvn$pK))
+
+# Select pK that maximizes BCmetric
+pK <- bcmvn$pK[which.max(bcmvn$BCmetric)]
+
+# Plot BCmetric vs pK with labels
+plot(
+  bcmvn$pK, bcmvn$BCmetric,
+  type = "b",
+  xlab = "pK (Neighborhood Size)",
+  ylab = "BCmetric (Bimodality Coefficient)",
+  main = "DoubletFinder pK Parameter Sweep"
+)
+
+# Mark chosen pK
+abline(v = pK, col = "red", lty = 2)
+
+# Print chosen pK value
+pK
+
+# Note: A parameter sweep was performed to optimize the pK value, which was selected at the maximum of the BCmetric curve. Using this optimized pK, DoubletFinder identified approximately 7.5% of cells as doublets, consistent with expected doublet rates for 10x Genomics data.
+```
+
+
+# Run DoubletFinder
+```{r doublet_classification, echo=TRUE, warning=FALSE, error=FALSE, message=FALSE}
+
+# Estimate expected number of doublets 
+nExp <- round(0.075 * ncol(filtered_1))
+
+# Run DoubletFinder 
+filtered_1 <- doubletFinder(
+  seu = filtered_1,
+  PCs = 1:20,
+  pN = 0.25,
+  pK = pK,
+  nExp = nExp,
+  reuse.pANN = NULL,
+  sct = FALSE
+)
+
+# Checking how many doublets detected
+DF_col <- grep("DF.classifications", colnames(filtered_1@meta.data), value = TRUE)
+table(filtered_1@meta.data[[DF_col]])
+
+# Note: DoubletFinder identified approximately 7.5% of cells as doublets, consistent with expected doublet rates for 10x Genomics data.
+```
+
+
+# Removing doublets
+```{r remove_doublets, echo=TRUE, warning=FALSE, error=FALSE, message=FALSE}
+
+# Identify DoubletFinder classification column
+DF_col <- grep("DF.classifications", colnames(filtered_1@meta.data), value = TRUE)
+
+# Get names of singlet cells 
+singlet_cells <- rownames(filtered_1@meta.data)[
+  filtered_1@meta.data[[DF_col]] == "Singlet"
+]
+
+# Subset Seurat object using cell names
+filtered_1 <- subset(filtered_1, cells = singlet_cells)
+
+# Confirm final cell count
+ncol(filtered_1)
+```
+
+
+# Final normalization after removing doublets
+```{r final_normalization, echo=TRUE, warning=FALSE, error=FALSE, message=FALSE}
+
+# Normalize clean singlet dataset
+filtered_1 <- NormalizeData(filtered_1)
+
+# Identify variable features
+filtered_1 <- FindVariableFeatures(filtered_1)
+
+# Scale data
+filtered_1 <- ScaleData(filtered_1)
+
+# Run PCA
+filtered_1 <- RunPCA(filtered_1)
+
+# Visualize PCA variance 
+ElbowPlot(filtered_1)
+
+# Note: After removal of predicted doublets, the dataset was re-normalized and PCA was recomputed to ensure accurate dimensionality reduction for downstream clustering and visualization. No sharp elbow was observed, indicating that biological variation is distributed across multiple components; therefore, the first 20 PCs were retained for downstream clustering and UMAP visualization.
+```
+
+
+# Clustering and UMAP visualization
+```{r clustering_umap, echo=TRUE, warning=FALSE, error=FALSE, message=FALSE}
+
+# Build neighbor graph
+filtered_1 <- FindNeighbors(filtered_1, dims = 1:20)
+
+# Cluster cells
+filtered_1 <- FindClusters(filtered_1, resolution = 0.6)
+
+# Run UMAP
+filtered_1 <- RunUMAP(filtered_1, dims = 1:20)
+
+# Visualize clusters
+DimPlot(filtered_1, reduction = "umap", label = TRUE)
+```
+
+
+# Identify cluster marker genes
+```{r find_markers, echo=TRUE, warning=FALSE, error=FALSE, message=FALSE}
+
+markers <- FindAllMarkers(
+  filtered_1,
+  only.pos = TRUE,
+  min.pct = 0.25,
+  logfc.threshold = 0.25
+)
+
+head(markers)
+```
+
+
+# DotPlot for evidence-based cluster annotation
+```{r dotplot_evidence, echo=TRUE, warning=FALSE, error=FALSE, message=FALSE, fig.height=10, fig.width=10}
+
+# Ensure clustering identities are active
+Idents(filtered_1) <- "seurat_clusters"
+
+markers.to.plot1 <- c(
+  "Lrp2","Slc5a12","Slc13a3","Slc16a9","Epha7","Cryab",
+  "Slc12a1","Cldn16","Cldn10","Nos1",
+  "Slc12a3","Egf","Slc8a1",
+  "Aqp2","Slc4a1","Kit","Slc26a4",
+  "Nphs1","Ncam1","Upk1b",
+  "Flt1","Emcn","Lyve1","Kdr",
+  "Pdgfra","Pdgfrb","Piezo2","Acta2",
+  "Ptprc","Skap1","Cd74"
+)
+
+# Keep only genes present in the dataset
+markers.to.plot1 <- intersect(markers.to.plot1, rownames(filtered_1))
+
+DotPlot(filtered_1, features = markers.to.plot1) +
+  coord_flip() +
+  ggtitle("Identify clusters using seurat_clusters") +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+    axis.text.y = element_text(size = 8)
+  )
+```
+
+
+# Annotating
+```{r annotated_umap, echo=TRUE, error=FALSE, fig.height=10, fig.width=10, message=FALSE, warning=FALSE}
+
+# Ensure identities are cluster IDs
+Idents(filtered_1) <- "seurat_clusters"
+
+# Create generic labels for ALL clusters
+cluster_ids <- levels(filtered_1)
+celltype_labels <- setNames(paste0("Cluster_", cluster_ids), cluster_ids)
+
+# Assign biological names 
+celltype_labels[c("1","4","15")] <- "Proximal Tubule Segment 1"
+celltype_labels[c("0","3")] <- "Proximal Tubule Segment 2"
+celltype_labels["5"] <- "Proximal Tubule Segment 3"
+celltype_labels[c("10","18")] <- "Descending Thin Limb"
+celltype_labels["8"] <- "Thick Ascending Limb alpha"
+celltype_labels["7"] <- "Thick Ascending Limb beta"
+celltype_labels["6"] <- "Distal Convoluted Tubule 1 and 2"
+celltype_labels["9"] <- "Connecting Tubule"
+celltype_labels[c("12","14")] <- "Principal Cell"
+celltype_labels["16"] <- "Intercalated Cell Type A"
+celltype_labels["17"] <- "Intercalated Cell Type B"
+celltype_labels["22"] <- "Podocyte or Parietal Epithelial Cell"
+celltype_labels["21"] <- "Urothelial Cell"
+celltype_labels[c("2","13")] <- "Endothelial Cell"
+celltype_labels["11"] <- "Fibroblast"
+celltype_labels["20"] <- "Mesangial Cell"
+celltype_labels["19"] <- "Macrophage"
+
+
+# Apply labels safely
+filtered_1$celltype <- unname(celltype_labels[Idents(filtered_1)])
+
+# Set identity to cell type
+Idents(filtered_1) <- filtered_1$celltype
+
+# Final annotated UMAP
+DimPlot(filtered_1, reduction = "umap", label = TRUE, pt.size = 0.5, label.size = 3) +
+  ggtitle("Kidney Cell Types (Annotated)") +
+  coord_cartesian(clip = "off") +
+  theme(
+    plot.margin = margin(t = 10, r = 10, b = 10, l = 40)
+  )
+```
+
+
+# Relevel clusters in biological order
+```{r, echo=TRUE, warning=FALSE, error=FALSE, message=FALSE}
+
+# Decide on a biological order for the named cell types
+bio_order_main <- c("Proximal Tubule Segment 1", "Proximal Tubule Segment 2", "Proximal Tubule Segment 3", "Descending Thin Limb", "Thick Ascending Limb alpha", "Thick Ascending Limb beta", "Distal Convoluted Tubule 1 and 2", "Connecting Tubule", "Principal Cell", "Intercalated Cell Type A", "Intercalated Cell Type B", "Podocyte or Parietal Epithelial Cell", "Urothelial Cell", "Endothelial Cell","Fibroblast","Mesangial Cell","Macrophage")
+
+filtered_1$celltype <- factor(filtered_1$celltype, levels = bio_order_main)
+Idents(filtered_1) <- filtered_1$celltype
+
+```
+
+
+# Generate a dot plot to visualize marker expression
+```{r, echo=TRUE, warning=FALSE, error=FALSE, message=FALSE, fig.height=10,fig.width=10}
+
+# At this point Idents(filtered_1) == celltype (biological identities) 
+
+markers.to.plot1 <- c(
+"Lrp2","Slc5a12","Slc13a3","Slc16a9","Epha7","Cryab","Slc12a1","Cldn16",
+"Cldn10","Nos1","Slc12a3","Egf","Slc8a1","Aqp2","Slc4a1","Kit","Slc26a4",
+"Nphs1","Ncam1","Upk1b","Flt1","Emcn","Lyve1","Kdr","Pdgfra","Pdgfrb",
+"Piezo2","Acta2","Ptprc","Skap1","Cd74"
+)
+markers.to.plot1 <- intersect(markers.to.plot1, rownames(filtered_1))
+
+DotPlot(filtered_1, features = markers.to.plot1) +
+  coord_flip() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 6),
+        axis.text.y = element_text(size = 7)) +
+  labs(x = "Gene Features", y = "Cell Type") +
+  ggtitle("DotPlot of Kidney Marker Genes")
+```
+
+
+# Interactive UMAP
+
+```{r, echo=TRUE, warning=FALSE, error=FALSE, message=FALSE, fig.height=20, fig.width=20}
+
+# Create an interactive UMAP using celltype identities
+umap_plot <- DimPlot(filtered_1, reduction = "umap", group.by = "celltype", label = TRUE) +
+ggtitle("Interactive UMAP of Kidney Cell Types")
+
+ggplotly(umap_plot)
+```
+
+
