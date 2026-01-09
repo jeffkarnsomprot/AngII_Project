@@ -1,0 +1,478 @@
+---
+title: "AngII_1"
+author: "Paul Cho"
+date: "2025-12-19"
+output: html_document
+    code_folding: hide
+    df_print: paged
+    toc: true
+    toc_float: true
+---
+
+# Loading packages
+
+```{r}
+if (!require("here")) {install.packages("here"); require("here")}
+
+Datasets <- "Datasets"
+Outputs <- "Outputs"
+
+if (!dir.exists(here(Datasets))) {dir.create(here(Datasets))}
+if (!dir.exists(here(Outputs))) {dir.create(here(Outputs))}
+```
+
+```{r}
+install.packages("remotes")
+remotes::install_github('chris-mcginnis-ucsf/DoubletFinder', force = TRUE)
+
+install.packages("devtools")
+devtools::install_github("davidsjoberg/ggsankey")
+```
+
+```{r}
+if (!require("dplyr")) {install.packages("dplyr"); require("dplyr")}
+if (!require("Seurat")) {install.packages("Seurat"); require("Seurat")}
+if (!require("patchwork")) {install.packages("patchwork"); require("patchwork")}
+if (!require("cowplot")) {install.packages("cowplot"); require("cowplot")}
+if (!require("ggpubr")) {install.packages("ggpubr"); require("ggpubr")}
+if (!require("plotly")) {install.packages("plotly"); require("plotly")}
+if (!require("knitr")) {install.packages("knitr"); require("knitr")}
+if (!require("htmlwidgets")) {install.packages("htmlwidgets"); require("htmlwidgets")}
+if (!require("tidyverse")) {install.packages("tidyverse"); require("tidyverse")} # for titying up data
+if (!require("RColorBrewer")) {install.packages("RColorBrewer"); require("RColorBrewer")} # for color brewer
+if (!require("sctransform")) {install.packages("sctransform"); require("sctransform")} # for data normalization
+if (!require("openxlsx")) {install.packages("openxlsx"); require("openxlsx")} # to save .xlsx files
+if (!require("SoupX")) {install.packages("SoupX"); require("SoupX")}
+if (!require("readxl")) {install.packages("readxl"); require("readxl")}
+if (!require("hdf5r")) {install.packages("hdf5r"); require("hdf5r")}
+
+if (!require("glmGamPoi")) {BiocManager::install('glmGamPoi'); require("glmGamPoi")} # for data normalization, sctransform
+if (!require("EnhancedVolcano")) {BiocManager::install('EnhancedVolcano'); require("EnhancedVolcano")} # volcano plot
+
+library(ggsankey)
+library(DoubletFinder)
+
+set.seed((12345))
+here()
+
+#renv::init()
+#renv::install("Seurat@5.2.0")
+#renv::install("hdf5r")
+#renv::install("chris-mcginnis-ucsf/DoubletFinder")
+#renv::snapshot()
+```
+
+# Loading the dataset
+
+```{r}
+kidney1 <- "kidney1"
+```
+
+```{r}
+# Create a Soup Channel Object(sc) to use for future filtering of ambient RNA
+RawDataset = Read10X_h5(here("datasets", "1_raw_feature_bc_matrix.h5"))
+FilteredDataset = Read10X_h5(here("datasets", "1_filtered_feature_bc_matrix.h5"))
+
+# Make a Seurat Object from the filtered control data 
+filtered_kidney <- Read10X_h5(here("datasets", "1_filtered_feature_bc_matrix.h5"))
+filtered_kidney <- CreateSeuratObject(counts = filtered_kidney, project = "Filteredkidney_snRNA")
+```
+
+#SoupX
+
+```{r}
+sc = SoupChannel(RawDataset,FilteredDataset)
+
+# Cluster the Cells with Seurat 
+filtered_kidney <- SCTransform(filtered_kidney, verbose = F)
+filtered_kidney <- RunPCA(filtered_kidney, verbose = F)
+filtered_kidney <- RunUMAP(filtered_kidney, dims = 1:40, verbose = F)
+filtered_kidney <- FindNeighbors(filtered_kidney, dims = 1:40, verbose = F)
+filtered_kidney <- FindClusters(filtered_kidney, verbose = F)
+
+meta <- filtered_kidney@meta.data
+umap <- filtered_kidney@reductions$umap@cell.embeddings
+clusters <- setNames(meta$seurat_clusters, rownames(meta))
+```
+
+
+```{r}
+#Ensure the two following numbers are equal before continuing 
+check1 <- length(clusters)
+check2 <- nrow(sc$metaData)
+
+sc <- setClusters(sc, clusters)
+sc <- setDR(sc, umap)
+```
+
+Calculating contamination fraction:
+```{r}
+sc = autoEstCont(sc)
+```
+Post rho value is 1.7% (estimated amount of ambient RNA is 1.7%, low)
+
+```{r}
+#Clean the data
+filtered_kidney_out = adjustCounts(sc)
+ 
+#Create a new Seurat Object out of the cleaned data
+seurat.obj <- CreateSeuratObject(filtered_kidney_out)
+
+# Remove unused objects in environment to save RAM
+
+#rm(filtered_kidney, filtered_kidney_out, FilteredDataset, RawDataset, sc, meta, check1, check2, clusters, umap, y, Datasets, Outputs)
+```
+
+# Doublet filtering
+
+1. DoubletFinder: removing doublets(droplets that captured 2+ cells instead of 1)
+- After running, look at "DF.class", which labels each cell as “Doublet” or “Singlet.”
+- Visualize results using UMAP.
+- pANN score: how doublet-like a cell is. Useful for threshold tuning.
+2. Manual doublet curation
+
+```{r}
+Start <- ncol(seurat.obj)
+
+p1 <- VlnPlot(seurat.obj, features = c("nFeature_RNA")) + theme(axis.title.x = element_blank()) + theme(legend.position = 'none') + theme(axis.text.x = element_text(angle = 0, hjust = .5))
+
+p2 <- VlnPlot(seurat.obj, features = c("nFeature_RNA"), pt.size = 0) + theme(axis.title.x = element_blank()) + theme(legend.position = 'none') + theme(axis.text.x = element_text(angle = 0, hjust = .5))
+
+p3 <- VlnPlot(seurat.obj, features = c("nCount_RNA")) + theme(axis.title.x = element_blank())  + theme(legend.position = 'none') + theme(axis.text.x = element_text(angle = 0, hjust = .5))
+
+p4 <- VlnPlot(seurat.obj, features = c("nCount_RNA"), pt.size = 0) + theme(axis.title.x = element_blank())  + theme(legend.position = 'none') + theme(axis.text.x = element_text(angle = 0, hjust = .5))
+
+cowplot::plot_grid(p1, p2, p3, p4, ncol = 4, scale = .85) + draw_label("Before Filtering", y = .95, size = 22, fontface = "bold")
+
+```
+```{r}
+# Minimal filtering of low quality cells 
+seurat.obj.f <- subset(seurat.obj, nFeature_RNA > 1000)
+
+p1 <- VlnPlot(seurat.obj.f, features = c("nFeature_RNA")) + theme(axis.title.x = element_blank()) + theme(legend.position = 'none') + theme(axis.text.x = element_text(angle = 0, hjust = .5))
+
+p2 <- VlnPlot(seurat.obj.f, features = c("nFeature_RNA"), pt.size = 0) + theme(axis.title.x = element_blank()) + theme(legend.position = 'none') + theme(axis.text.x = element_text(angle = 0, hjust = .5))
+
+p3 <- VlnPlot(seurat.obj.f, features = c("nCount_RNA")) + theme(axis.title.x = element_blank())  + theme(legend.position = 'none') + theme(axis.text.x = element_text(angle = 0, hjust = .5))
+
+p4 <- VlnPlot(seurat.obj.f, features = c("nCount_RNA"), pt.size = 0) + theme(axis.title.x = element_blank())  + theme(legend.position = 'none') + theme(axis.text.x = element_text(angle = 0, hjust = .5))
+
+cowplot::plot_grid(p1, p2, p3, p4, ncol = 4, scale = .85) + draw_label("After Filtering Low Complexity Cells", y = .95, size = 22, fontface = "bold")
+```
+
+```{r}
+Filter_1 <- ncol(seurat.obj.f)
+
+amountfiltered1 <- Start-Filter_1
+
+#Making a table to display the amount of cells being filtered out with the minimal filtering of low quality cells applied to the snRNAseq dataset. 
+cell_counts <- data.frame(Phase = c("Before Filtering", "After Filtering", "Amount Filtered"), Cell_Number = c(Start, Filter_1, amountfiltered1))
+
+print(cell_counts)
+
+# Remove unused objects in environment to save RAM
+
+#rm(seurat.obj, p1, p2, p3, p4, cell_counts)
+```
+
+# High-dimensional superclustering
+
+```{r}
+resolution_value <- 1.5
+```
+
+```{r}
+# Pre-process standard workflow
+seurat.obj.f <- NormalizeData(object = seurat.obj.f)
+seurat.obj.f <- FindVariableFeatures(object = seurat.obj.f)
+seurat.obj.f <- ScaleData(object = seurat.obj.f)
+seurat.obj.f <- RunPCA(object = seurat.obj.f)
+
+# ElbowPlot(seurat.obj.f, ndims = 40)
+
+seurat.obj.f <- FindNeighbors(object = seurat.obj.f, dims = 1:40)
+seurat.obj.f <- FindClusters(object = seurat.obj.f, resolution = resolution_value, verbose = F)
+
+# Make a UMAP to visualize the clusters 
+seurat.obj.f <- RunUMAP(object = seurat.obj.f, dims = 1:40)
+DimPlot(seurat.obj.f, reduction = "umap", label = TRUE) +
+   theme(plot.title = element_text(hjust = 0.5)) +
+   ggtitle(paste0("Initial Clustering for ", kidney1))
+```
+
+# Save excel spreadsheet of DEG List by Cluster
+This file can be used to determine the prominent features (highly enriched genes) of each cluster. + will be in the Outputs folder
+
+```{r}
+all_markers <- FindAllMarkers(seurat.obj.f, only.pos = TRUE, min.pct = 0.5, logfc.threshold = 1)
+
+# Order by avg_log2FC
+all_markers <- all_markers %>%
+  arrange(desc(avg_log2FC)) %>%
+  select(gene, everything())
+
+# Split by cluster (ident column)
+marker_list <- split(all_markers, all_markers$cluster)
+
+# Sort names alphanumerically
+sorted_cluster_names <- names(marker_list)[order(as.numeric(names(marker_list)))]
+
+# Create a workbook
+wb <- createWorkbook()
+
+# Add each cluster as a new worksheet
+for (cluster_name in sorted_cluster_names) {
+  addWorksheet(wb, sheetName = cluster_name)
+  writeData(wb, sheet = cluster_name, marker_list[[cluster_name]])
+}
+
+date <- format(Sys.Date(), "%Y%m%d")
+
+# Save workbook
+saveWorkbook(wb, here("Outputs", paste0(date, "_", kidney1, "_FindAllMarkers_By_Cluster.xlsx")), overwrite = TRUE)
+```
+
+```{r}
+cell_type_markers_df <- data.frame(
+  Subclass = c(
+    "PTS1", "PTS2", "PTS3", "DTL", "TALA", "TALB", "MD", "DCT1", "DCT2", "CNT",
+    "PC", "ICA", "ICB", "PODO", "PEC", "URO", "EC", "LYMPH", "FIB", "MES", "VSMC", "LYMPHO", "MACRO"
+  ),
+  Positive_Marker_1 = c(
+    "Lrp2", "Lrp2", "Lrp2", "Epha7", "Slc12a1", "Slc12a1", "Nos1", "Slc12a3", "Slc12a3", "Slc8a1",
+    "Aqp2", "Slc4a1", "Slc26a4", "Nphs1", "Ncam1", "Upk1b", "Flt1", "Lyve1", "Pdgfra", "Pdgfrb", "Pdgfrb", "Ptprc", "Ptprc"
+  ),
+  Positive_Marker_2 = c(
+    "Slc5a12", "Slc13a3", "Slc16a9", "Cryab", "Cldn16", "Cldn10", "Slc12a1", "Egf", "Slc8a1", NA,
+    NA, "Kit", NA, NA, NA, NA, "Emcn", "Kdr", "Pdgfrb", "Piezo2", "Acta2", "Skap1", "Cd74"
+  ),
+  stringsAsFactors = FALSE
+)
+
+# Creating a dot plot to cross reference the features with the cell clusters present, seeing the average expression and percent expressed 
+
+markers.to.plot1 <- c("Lrp2",         # PTS1, PTS2, PTS3
+                      "Slc5a12",      # PTS1
+                      "Slc13a3",      # PTS2
+                      "Slc16a9",      # PTS3
+                      "Epha7",        # DTL
+                      "Cryab",        # DTL
+                      "Slc12a1",      # TALA, TALB, MD
+                      "Cldn16",       # TALA
+                      "Cldn10",       # TALB
+                      "Nos1",         # MD
+                      "Slc12a3",      # DCT1, DCT2
+                      "Egf",          # DCT1
+                      "Slc8a1",       # CNT, DCT2
+                      "Aqp2",         # PC
+                      "Slc4a1",       # ICA
+                      "Kit",          # ICA
+                      "Slc26a4",      # ICB
+                      "Nphs1",        # PODO
+                      "Ncam1",        # PEC
+                      "Upk1b",        # URO
+                      "Flt1",         # EC
+                      "Emcn",         # EC
+                      "Lyve1",        # LYMPH
+                      "Kdr",          # LYMPH
+                      "Pdgfra",       # FIB
+                      "Pdgfrb",       # FIB, MES, VSMC
+                      "Piezo2",       # MES
+                      "Acta2",        # VSMC
+                      "Ptprc",        # LYMPHO, MACRO
+                      "Skap1",        # LYMPHO
+                      "Cd74"          # MACRO
+)
+
+p1 <- DotPlot(seurat.obj.f,
+features = markers.to.plot1,
+dot.scale = 5,
+dot.min = 0,
+scale.max = 100,
+scale.min = 0,
+col.min = -2.5,
+col.max = 2.5) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  coord_flip() +
+  labs(x = "Gene Features", y = "Clusters") +
+  theme(
+    axis.text.x  = element_text(size = 8, angle = 60, hjust = 1, vjust = 1),
+    axis.text.y  = element_text(size = 8),                                   
+  )
+
+p1
+```
+
+# Missing cell types
+```{r}
+p2 <- as.data.frame(p1$data)
+
+low_pct_features <- p2 %>%
+  group_by(features.plot) %>%
+  filter(all(pct.exp <= 75)) %>%
+  distinct(features.plot) %>%
+  pull(features.plot)
+
+# low_pct_features 
+
+low_pct_features2 <- as.data.frame(low_pct_features)
+
+markers_long <- cell_type_markers_df %>%
+  pivot_longer(cols = c(Positive_Marker_1, Positive_Marker_2),
+               names_to = "marker_type", values_to = "marker") %>%
+  filter(!is.na(marker))  # remove any NAs in marker
+
+# Step 2: Join with low_pct_features2
+low_pct_features2_annotated <- low_pct_features2 %>%
+  left_join(markers_long, by = c("low_pct_features" = "marker")) %>%
+  rename(cell_type = Subclass)  # rename Subclass to cell_type
+
+missing_cell_types <- unique(na.omit(low_pct_features2_annotated$cell_type))
+
+missing_cell_types
+```
+
+The following features were found to have less than 75% of the cells expressing them in the any clusters ("DTL"    "TALA"   "MD"     "ICA"    "URO"    "LYMPH"  "MES"    "VSMC"   "LYMPHO")
+
+
+See if there are any clusters that are clearly enriched for the cell-type defining markers:
+```{r}
+for (i in low_pct_features) {
+  
+  # Find the subclass (if any) where the marker matches Positive_Marker_1 or _2
+  subclass_match <- cell_type_markers_df %>%
+    filter(Positive_Marker_1 == i | Positive_Marker_2 == i) %>%
+    pull(Subclass)
+
+  # If found, use the first match; else NA
+  subclass_label <- if (length(subclass_match) > 0) subclass_match[1] else NA
+  
+  # Build the title
+  title_text <- if (!is.na(subclass_label)) {
+    paste0(i, " (", subclass_label, ")")
+  } else {
+    i
+  }
+  
+  # Create plot
+  p <- FeaturePlot(seurat.obj.f, features = i) &
+       scale_colour_gradientn(colours = rev(brewer.pal(n = 9, name = "RdYlBu"))) &
+       ggtitle(title_text)
+  
+  print(p)  # Or save/store as needed
+}
+```
+- Signals more scattered = ambient RNA.
+- Should be near where biology expects.
+
+Upk1b(URO), Piezo2 (MES)
+
+# Continue with DoubletFinder
+```{r}
+# PCs set to 1:20 since it was between 15-20 on the earlier elbow plot 
+sweep.res.list_seurat.obj.f <- paramSweep(seurat.obj.f, PCs = 1:20, sct = FALSE) 
+```
+
+```{r}
+#Summarize each combination of pN and pK
+sweep.stats_seurat.obj.f <- summarizeSweep(sweep.res.list_seurat.obj.f, GT = FALSE) 
+
+#Select the pK that corresponds to max bcmvn to optimize doublet detection
+bcmvn_seurat.obj.f <- find.pK(sweep.stats_seurat.obj.f)
+```
+
+```{r}
+pK <- bcmvn_seurat.obj.f %>% 
+  filter(BCmetric == max(BCmetric)) %>%
+  select(pK) 
+
+#See pK in the Values Environment
+pK <- as.numeric(as.character(pK[[1]]))
+```
+
+```{r}
+# Homotypic Doublet Proportion Estimate -------------------------------------------------------------------------------------
+annotations <- seurat.obj.f@meta.data$seurat_clusters  
+ 
+homotypic.prop <- modelHomotypic(annotations)           
+
+# 10X Multiplet Rate Table (the doublet ratio is # of cells recovered divided by 125000) https://kb.10xgenomics.com/hc/en-us/articles/360001378811-What-is-the-maximum-number-of-cells-that-can-be-profiled-
+
+nExp_poi <- round(nrow(seurat.obj.f@meta.data) # To calculate cell number
+                  /125000              # To calculate the doublet ratio
+                  *nrow(seurat.obj.f@meta.data))
+
+nExp_poi_adj <- round(nExp_poi*(1-homotypic.prop))
+```
+
+```{r}
+seurat.obj.f_doublets <- doubletFinder(seurat.obj.f,
+                        PCs = 1:20,
+                        pN = 0.25,
+                        pK = pK,
+                        nExp = nExp_poi_adj,
+                        reuse.pANN = NULL, sct = FALSE)
+
+# Change names of columns for future analysis 
+colnames(seurat.obj.f_doublets@meta.data)[grep("^pANN", colnames(seurat.obj.f_doublets@meta.data))] <- "pANN"
+colnames(seurat.obj.f_doublets@meta.data)[grep("^DF.class", colnames(seurat.obj.f_doublets@meta.data))] <- "DF.class"
+
+seurat.obj.f_doublets@meta.data$DF.class <- factor(
+  seurat.obj.f_doublets@meta.data$DF.class,
+  levels = c("Singlet", "Doublet")
+)
+table(seurat.obj.f_doublets@meta.data$DF.class)
+
+# Make a value for the doublet count to include in the analysis
+doublet_count <- table(seurat.obj.f_doublets@meta.data$DF.class)["Doublet"]
+```
+
+```{r}
+p1 <- VlnPlot(seurat.obj.f_doublets, features = c("nFeature_RNA"), group.by = "DF.class") +
+  theme(axis.title.x = element_blank(),
+        legend.position = 'none',
+        axis.text.x = element_text(angle = 0, hjust = .5))
+
+p2 <- VlnPlot(seurat.obj.f_doublets, features = c("nCount_RNA"), group.by = "DF.class") +
+  theme(axis.title.x = element_blank(),
+        legend.position = 'none',
+        axis.text.x = element_text(angle = 0, hjust = .5))
+
+p3 <- DimPlot(seurat.obj.f_doublets, group.by = "DF.class")
+
+grid <- plot_grid(p1, p2, p3, ncol = 3, align = "h", axis = "tb", rel_widths = c(1, 1, 2))
+
+plot_grid(
+  ggdraw() + draw_label("Violin and Feature Plot by DF.class", fontface = 'bold', size = 22, hjust = 0.5),
+  grid,
+  ncol = 1,
+  rel_heights = c(0.1, 1)
+)
+```
+
+```{r}
+seurat.obj.f_singlets <- subset(seurat.obj.f_doublets, DF.class == "Singlet")
+
+DimPlot(seurat.obj.f_singlets, reduction = "umap", label = T)+
+   theme(plot.title = element_text(hjust = 0.5)) +
+   ggtitle(paste0("UMAP for ", kidney1, " after DoubletFinder"))
+```
+
+```{r}
+Filter_2  <- ncol(seurat.obj.f_singlets)
+
+amountfiltered2 <- Filter_1-Filter_2
+
+#Making a table to display the amount of cells being filtered out with the minimal filtering of low quality cells applied to the snRNAseq dataset. 
+cell_counts <- data.frame(Phase = c("Before Filtering", "After Filtering", "Amount Filtered"), Cell_Number = c(Filter_1, Filter_2, amountfiltered2))
+
+print(cell_counts)
+
+# Remove unused objects in environment to save RAM
+# rm(seurat.obj.f, seurat.obj.f_doublets, sweep.res.list_seurat.obj.f, sweep.stats_seurat.obj.f, p, p1, p2)
+```
+
+773 cells were removed after DoubletFinder.
+
+# Manual doublet filtering
+
