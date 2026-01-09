@@ -59,25 +59,7 @@ raw_1 <- CreateSeuratObject(
 ```
 
 
-# Quality control for raw data
-```{r qc_raw_before, echo=TRUE, warning=FALSE, error=FALSE, message=FALSE, fig.height=5, fig.width=12}
-
-# Cell count (for reporting)
-Start_raw <- ncol(raw_1)
-
-# QC violin plots (raw data)
-VlnPlot(
-  raw_1,
-  features = c("nFeature_RNA", "nCount_RNA"),
-  ncol = 2,
-  pt.size = 0
-)
-
-# Note: QC of the raw dataset revealed that the majority of barcodes had near-zero gene and UMI counts, consistent with empty droplets, motivating downstream filtering. No downstream clustering was performed on the raw dataset, as it primarily serves to demonstrate the necessity of filtering empty droplets.
-```
-
-
-# Quality control on filtered data
+# QC
 ```{r qc_filtered_before, echo=TRUE, warning=FALSE, error=FALSE, message=FALSE, fig.height=10, fig.width=10}
 
 # Cell count before QC filtering
