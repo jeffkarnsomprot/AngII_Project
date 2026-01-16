@@ -832,7 +832,10 @@ f1c <- ggplot(t2, aes(fill = Cell_type, y = Frequency, x = 1)) +
 f1a + f1b +f1c
 
 
-# Saving QS File
+# Saving Qq File
 
-qsave(seurat.obj.f_cleaned, file = here("jk_code", "CleanDS1.qs"))
+```{r}
 
+qsave(seurat.obj.f_cleaned, file = here("jk_code", "CleanDS1.rds"))
+
+```
