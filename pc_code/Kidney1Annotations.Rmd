@@ -2,14 +2,32 @@
 title: "AngII_1"
 author: "Paul Cho"
 date: "2025-12-19"
-output: html_document
-    code_folding: hide
-    df_print: paged
+output:
+  html_document:
     toc: true
-    toc_float: true
+    toc_depth: 4
+    toc_float:
+      collapsed: true
+      number_sections: true
+    theme: journal
+    df_print: paged
+    code_folding: hide
+    highlight: pygments
+  word_document:
+    toc: true
+    toc_depth: '4'
+editor_options:
+  chunk_output_type: inline
 ---
 
 # Loading packages
+```{r}
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+if (!requireNamespace("remotes", quietly = TRUE)) {
+  install.packages("remotes")
+}
+library(remotes)
+```
 
 ```{r}
 if (!require("here")) {install.packages("here"); require("here")}
@@ -20,6 +38,7 @@ Outputs <- "Outputs"
 if (!dir.exists(here(Datasets))) {dir.create(here(Datasets))}
 if (!dir.exists(here(Outputs))) {dir.create(here(Outputs))}
 ```
+
 
 ```{r}
 install.packages("remotes")
@@ -86,8 +105,8 @@ sc = SoupChannel(RawDataset,FilteredDataset)
 # Cluster the Cells with Seurat 
 filtered_kidney <- SCTransform(filtered_kidney, verbose = F)
 filtered_kidney <- RunPCA(filtered_kidney, verbose = F)
-filtered_kidney <- RunUMAP(filtered_kidney, dims = 1:40, verbose = F)
-filtered_kidney <- FindNeighbors(filtered_kidney, dims = 1:40, verbose = F)
+filtered_kidney <- RunUMAP(filtered_kidney, dims = 1:30, verbose = F)
+filtered_kidney <- FindNeighbors(filtered_kidney, dims = 1:30, verbose = F)
 filtered_kidney <- FindClusters(filtered_kidney, verbose = F)
 
 meta <- filtered_kidney@meta.data
@@ -188,13 +207,13 @@ seurat.obj.f <- FindVariableFeatures(object = seurat.obj.f)
 seurat.obj.f <- ScaleData(object = seurat.obj.f)
 seurat.obj.f <- RunPCA(object = seurat.obj.f)
 
-# ElbowPlot(seurat.obj.f, ndims = 40)
+# ElbowPlot(seurat.obj.f, ndims = 30)
 
-seurat.obj.f <- FindNeighbors(object = seurat.obj.f, dims = 1:40)
+seurat.obj.f <- FindNeighbors(object = seurat.obj.f, dims = 1:30)
 seurat.obj.f <- FindClusters(object = seurat.obj.f, resolution = resolution_value, verbose = F)
 
 # Make a UMAP to visualize the clusters 
-seurat.obj.f <- RunUMAP(object = seurat.obj.f, dims = 1:40)
+seurat.obj.f <- RunUMAP(object = seurat.obj.f, dims = 1:30)
 DimPlot(seurat.obj.f, reduction = "umap", label = TRUE) +
    theme(plot.title = element_text(hjust = 0.5)) +
    ggtitle(paste0("Initial Clustering for ", kidney1))
@@ -476,3 +495,623 @@ print(cell_counts)
 
 # Manual doublet filtering
 
+```{r}
+f1 <- DotPlot(seurat.obj.f_singlets,
+features = markers.to.plot1,
+dot.scale = 8,
+dot.min = 0,
+scale.max = 100,
+scale.min = 0,
+col.min = -2.5,
+col.max = 2.5) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  coord_flip() +
+  labs(x = "Gene Features", y = "Clusters")
+
+f1
+```
+
+# Clusters of concern
+
+```{r}
+f2 <- as.data.frame(f1$data)
+
+maybe_doublets <- f2 %>%
+  group_by(id) %>%
+  filter(all(avg.exp.scaled <= 2.0)) %>%
+  distinct(id) %>%
+  pull(id)
+
+maybe_doublets
+
+# Create color palette: grey for all, color for maybe_doublets
+all_clusters <- levels(seurat.obj.f_singlets)
+cluster_colors <- setNames(rep("grey80", length(all_clusters)), all_clusters)
+cluster_colors[maybe_doublets] <- "red"
+
+# Get UMAP coordinates and cluster assignments
+umap_data <- Embeddings(seurat.obj.f_singlets, "umap") %>%
+  as.data.frame() %>%
+  mutate(cluster = Idents(seurat.obj.f_singlets))
+
+# Compute cluster centroids
+cluster_centroids <- umap_data %>%
+  group_by(cluster) %>%
+  summarise(UMAP_1 = mean(umap_1), UMAP_2 = mean(umap_2))
+
+# Keep only centroids for maybe_doublets
+label_data <- cluster_centroids %>%
+  filter(cluster %in% maybe_doublets)
+
+# Plot
+DimPlot(seurat.obj.f_singlets, reduction = "umap", cols = cluster_colors) +
+  ggrepel::geom_text_repel(
+    data = label_data,
+    aes(x = UMAP_1, y = UMAP_2, label = cluster),
+    size = 4,
+    color = "black",
+    fontface = "bold",
+    max.overlaps = Inf,
+    box.padding = 0.5,
+    point.padding = 0.5
+  )
+```
+
+```{r}
+# Add doublet cluster numbers like the code below to classify clusters as doublets
+
+doublet_clusters <- c(2, 5, 14, 17, 30)
+```
+
+```{r}
+# Annotate metadata
+seurat.obj.f_singlets@meta.data <- seurat.obj.f_singlets@meta.data %>%
+  mutate(subclass.doublet = if_else(
+    seurat_clusters %in% doublet_clusters, "DOUBLET", "SINGLET"
+  ))
+
+# Change the identities to align with new subclass names and make umap
+Idents(seurat.obj.f_singlets) <- seurat.obj.f_singlets@meta.data$subclass.doublet
+
+f1 <- DimPlot(seurat.obj.f_singlets, reduction = "umap") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ggtitle("Before Manual Doublet Filtering")
+
+# Double check the table to ensure SINGLET & DOUBLET cluster appear with this function
+table(Idents(seurat.obj.f_singlets))
+```
+
+```{r}
+# Clean out the doublets manually that were identified 
+seurat.obj.f_cleaned <- subset(seurat.obj.f_singlets, idents = "DOUBLET", invert = TRUE)
+
+# Double check that the identity was removed 
+table(Idents(seurat.obj.f_cleaned))
+
+# Make umap to double check removal 
+f2 <- DimPlot(seurat.obj.f_cleaned, reduction = "umap") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ggtitle("After Manual Doublet Filtering")
+
+f1+f2
+```
+```{r}
+# Remove unused objects in environment to save RAM
+rm(seurat.obj.f_singlets)
+```
+
+# Cell annotation: Re-cluster singlets
+
+```{r}
+seurat.obj.f_cleaned <- SCTransform(seurat.obj.f_cleaned) %>%
+    RunPCA() %>%
+    FindNeighbors(dims = 1:30) %>%
+    FindClusters(resolution = 2, verbose = FALSE) %>%
+    RunUMAP(dims = 1:30)
+
+DimPlot(seurat.obj.f_cleaned, reduction = "umap", label = TRUE) +  
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ggtitle(paste0("Non-annotated Clusters for ", kidney1))
+```
+
+```{r}
+DefaultAssay(seurat.obj.f_cleaned) <- "RNA"
+```
+
+```{r}
+# Make mdd for all removed doublets 
+
+DotPlot(seurat.obj.f_cleaned,
+features = markers.to.plot1,
+dot.scale = 8,
+dot.min = 0,
+scale.max = 100,
+scale.min = 0,
+col.min = -2.5,
+col.max = 2.5) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  coord_flip() +
+  labs(x = "Gene Features", y = "Clusters") +
+  theme(
+    axis.text.x  = element_text(size = 8, angle = 60, hjust = 1, vjust = 1),
+    axis.text.y  = element_text(size = 8),                                   
+  )
+p1
+```
+
+```{r}
+# Cluster 0: Slc13a3 => Lrp2 => Slc16a9: PTS2?
+# Cluster 1: Slc5a12 > Lrp2: PTS1
+# Cluster 2: Slc12a1 > Egf > Cldn10: TALB?
+# Cluster 3: Slc16a9 > Lrp2 > Cldn10: PTS3
+# Cluster 4: Slc13a3 > Lrp2 > Cldn10 > Slc16a9: PTS2? more likely (0 and 4 likely both PTS2)
+# Cluster 5: Flt1 = Emcn > Kdr > Piezo2: EC
+# Cluster 6: Slc5a12 > Lrp2: PTS1? 1 and 6 likely both PTS1
+# Cluster 7: Slc12a3 = Egf > Slc8a1: DCT1
+# Cluster 8: Slc13a3 > Lrp2 > Cldn10 > Slc5a12: PTS2 (0, 4 and 8 all PTS2?)
+# Cluster 9: Slc8a1 > Aqp2 > Slc12a3: CNT? or DCT2 due to presence of Slc12a3
+# Cluster 10: Slc12a1 = Egf > Cldn10 > Cldn16: TALB? (2 and 10 likely both TALB, or 10 might be TALA)
+# Cluster 11: Pdgfra > Pdgfrb: FIB
+# Cluster 12: Slc5a12 > Lrp2 > Cldn10: PTS1 (1, 6 & 12 all PTS1?)
+# Cluster 13: Aqp2 > Slc8a1: Likely PC
+# Cluster 14: Emcn > Fit1 >> Kdr: EC
+# Cluster 15: Slc16a9 > Lrp2 > Cldn10: PTS3
+# Cluster 16: Epha7 > Cryab >> Ncam1: DTL
+# Cluster 17: Slc12a3 > Slc8a1 > Egf: DCT2
+# Cluster 18: Cryab > Upk1b > Slc8a1 > Aqp2: DTL? or URO
+# Cluster 19: Kit > Slc4a1 > Slc8a1 > Cryab: ICA
+# Cluster 20: Cryab > Epha7 > Cldn10: DTL
+# Cluster 21: Slc26a4 > Kit: ICB
+# Cluster 22: Aqp2 > Cryab > Slc8a1: PC? or DTL? (13 & 22 llikely both PC)
+# Cluster 23: Cryab > Aqp2 > Slc8a1: PC? (13, 22 & 23 all PC?)
+# Cluster 24: Slc12a1 >> Egf > Cldn10: TALB(2, 10 & 24 all TALB?)
+# Cluster 25: Nphs1 > Egf > Ncam1: PODO
+# Cluster 26: Slc8a1 > Pdgfrb > Piezo2 > Acta2: CNT? or VSMC
+```
+
+```{r}
+# Apply names to the clusters by subclass
+seurat.obj.f_cleaned@meta.data <- seurat.obj.f_cleaned@meta.data %>% mutate(subclass = dplyr::case_when(
+seurat_clusters == 0 ~ "PTS2",
+seurat_clusters == 1 ~ "PTS1",
+seurat_clusters == 2 ~ "TALB",
+seurat_clusters == 3 ~ "PTS3",
+seurat_clusters == 4 ~ "PTS2",
+seurat_clusters == 5 ~ "EC",
+seurat_clusters == 6 ~ "PTS1",
+seurat_clusters == 7 ~ "DCT1",
+seurat_clusters == 8 ~ "PTS2",
+seurat_clusters == 9 ~ "CNT",
+seurat_clusters == 10 ~ "TALB",
+seurat_clusters == 11 ~ "FIB",
+seurat_clusters == 12 ~ "PTS1",
+seurat_clusters == 13 ~ "PC",
+seurat_clusters == 14 ~ "EC",
+seurat_clusters == 15 ~ "PTS3",
+seurat_clusters == 16 ~ "DTL",
+seurat_clusters == 17 ~ "DCT2",
+seurat_clusters == 18 ~ "DTL",
+seurat_clusters == 19 ~ "ICA",
+seurat_clusters == 20 ~ "DTL",
+seurat_clusters == 21 ~ "ICB",
+seurat_clusters == 22 ~ "PC",
+seurat_clusters == 23 ~ "PC",
+seurat_clusters == 24 ~ "TALB",
+seurat_clusters == 25 ~ "PODO",
+seurat_clusters == 26 ~ "CNT"
+))
+
+# Filter out the doublets
+
+seurat.obj.f_cleaned <- subset(seurat.obj.f_cleaned, subset = subclass == "DOUBLET", invert = TRUE)
+
+subclass_order <- c("PTS1", "PTS2", "PTS3", "DTL", "TALA", "TALB", "MD", "DCT1", "DCT2", "CNT", "PC", "ICA", "ICB", "PODO", "PEC", "URO", "EC", "FIB", "MES", "LYMPHO", "MACRO")
+
+seurat.obj.f_cleaned@meta.data$subclass <- factor(seurat.obj.f_cleaned@meta.data$subclass, levels = subclass_order)
+
+# Change the identities to align with new subclass names and make umap
+Idents(seurat.obj.f_cleaned) <- seurat.obj.f_cleaned@meta.data$subclass
+
+DimPlot(seurat.obj.f_cleaned, reduction = "umap", label = TRUE, label.size = 4) +  
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ggtitle(paste0("Subclass Annotation for ", kidney1))
+```
+
+### Notes: PTS1/PTS2 together & nearby(?) but distinct PTS3 expresses more distal PT clusters: clear separation shows sufficient sequencing depth
+### DCT1 => DCT2 => CNT => PC continuu present
+### Where are TALA & MD?
+### Shouldn't DCT1 be ~3x the size of DCT2?
+### Otherwise looks fine
+
+```{r}
+Filter_3  <- ncol(seurat.obj.f_cleaned)
+
+amountfiltered3 <- Filter_2-Filter_3
+
+#Making a table to display the amount of cells being filtered out with the minimal filtering of low quality cells applied to the snRNAseq dataset. 
+cell_counts <- data.frame(Phase = c("Before Filtering", "After Filtering", "Amount Filtered"), Cell_Number = c(Filter_2, Filter_3, amountfiltered3))
+
+print(cell_counts)
+```
+
+```{r}
+# Step 1: Find markers (grouped by subclass)
+all_markers <- FindAllMarkers(
+  seurat.obj.f_cleaned,
+  only.pos = TRUE,
+  min.pct = 0.5,
+  logfc.threshold = 1,
+  group.by = "subclass"  # grouping by subclass instead of cluster ID
+)
+
+# Step 2: Sort markers by descending log2FC, put gene column first
+all_markers <- all_markers %>%
+  arrange(desc(avg_log2FC)) %>%
+  select(gene, everything())
+
+# Step 3: Split markers by subclass (stored in 'cluster' column still)
+marker_list <- split(all_markers, all_markers$cluster)
+
+# Step 4: Reorder the list according to your subclass_order
+# First ensure you're only including subclasses that are actually present
+valid_subclasses <- subclass_order[subclass_order %in% names(marker_list)]
+
+# Reorder marker_list based on that
+marker_list <- marker_list[valid_subclasses]
+
+# Step 5: Write to Excel
+wb <- createWorkbook()
+
+for (subclass in names(marker_list)) {
+  addWorksheet(wb, sheetName = subclass)
+  writeData(wb, sheet = subclass, marker_list[[subclass]])
+}
+
+# Step 6: Save file
+date <- format(Sys.Date(), "%Y%m%d")
+saveWorkbook(
+  wb,
+  here("Outputs", paste0(date, "_", kidney1, "_FindAllMarkers_By_Subclass.xlsx")),
+  overwrite = TRUE
+)
+```
+
+```{r}
+DimPlot(seurat.obj.f_cleaned, reduction = "umap", label = TRUE, label.size = 4) +  
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ggtitle(paste0("Subclass Annotation for ", kidney1))
+```
+# Linear(ish) Dotplot
+
+```{r}
+# Change the order of the identities on the x-axis to create a diagonal on the dotplot, going from top to bottom of the "naming kidney cells" table
+
+DotPlot(seurat.obj.f_cleaned,
+features = markers.to.plot1,
+group.by = "subclass",
+dot.scale = 8,
+dot.min = 0,
+scale.max = 100,
+scale.min = 0,
+col.min = -2.5,
+col.max = 2.5) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  coord_flip() +
+  labs(x = "Gene Features", y = "Clusters") +  
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ggtitle(paste0("Subclass Annotation for ", kidney1))
+```
+
+# Annotating by class
+```{r}
+# Change the specificty of the cells to a lower level and make another UMAP
+seurat.obj.f_cleaned@meta.data <- seurat.obj.f_cleaned@meta.data %>%
+  mutate(class = dplyr::case_when(
+    subclass %in% c("PTS1", "PTS2", "PTS3") ~ "PT",
+    subclass == "DTL" ~ "DTL",
+    subclass %in% c("TALA", "TALB", "MD") ~ "TAL",
+    subclass %in% c("DCT1", "DCT2") ~ "DCT",
+    subclass == "CNT" ~ "CNT",
+    subclass == "PC" ~ "PC",
+    subclass == "ICA" ~ "ICA",
+    subclass == "ICB" ~ "ICB",
+    subclass == "PODO" ~ "PODO",
+    subclass == "PEC" ~ "PEC",
+    subclass == "URO" ~ "URO",
+    subclass %in% c("EC", "ECG", "ECP", "LYMPH") ~ "EC",
+    subclass == "FIB" ~ "FIB",
+    subclass == "MES" ~ "MES",
+    subclass == "VSMC" ~ "VSMC",
+    subclass %in% c("LYMPHO", "MACRO") ~ "IMMUNE",
+  ))
+
+DimPlot(seurat.obj.f_cleaned, group.by = "class", label = TRUE, label.size = 4) +
+   theme(plot.title = element_text(hjust = 0.5)) +
+   ggtitle(paste0("Class Annotation for ", kidney1))
+```
+
+```{r}
+class_order <- c("PT", "DTL", "TAL", "DCT", "CNT", "PC", "ICA", "ICB", "PODO", "PEC", "URO", "EC", "FIB", "MES", "IMMUNE")
+seurat.obj.f_cleaned@meta.data$class <- factor(seurat.obj.f_cleaned@meta.data$class, levels = class_order)
+
+markers.to.plot2 <- c("Lrp2",         # PTS1, PTS2, PTS3
+                      "Cryab",        # DTL
+                      "Slc12a1",      # TAL1, TAL2, MD
+                      "Slc12a3",      # DCT1, DCT2
+                      "Slc8a1",       # CNT
+                      "Aqp2",         # PC
+                      "Kit",          # ICA
+                      "Slc26a4",      # ICB
+                      "Nphs1",        # PODO
+                      "Ncam1",        # PEC
+                      "Upk1b",        # URO
+                      "Flt1",         # EC
+                      "Pdgfra",       # FIB
+                      "Pdgfrb",       # FIB, MES, VSMC
+                      "Piezo2",       # MES
+                      "Ptprc"        # LYMPHO, MACRO
+)
+
+DotPlot(seurat.obj.f_cleaned,
+features = markers.to.plot2,
+group.by = "class",
+dot.scale = 8,
+dot.min = 0,
+scale.max = 100,
+scale.min = 0,
+col.min = -2.5,
+col.max = 2.5) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  coord_flip() +
+  labs(x = "Gene Features", y = "Clusters") +  
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ggtitle(paste0("Class Annotation for ", kidney1))
+```
+
+# Annotating by Type
+
+```{r}
+# Change the specificty of the cells to a further lower level and make another UMAP
+seurat.obj.f_cleaned@meta.data <- seurat.obj.f_cleaned@meta.data %>%
+  mutate(type = dplyr::case_when(
+    class %in% c("PT", "DTL", "TAL", "DCT", "CNT", "PC", "ICA", "ICB", "PODO", "PEC", "URO") ~ "EPITHELIAL",
+    class == "EC" ~ "ENDOTHELIAL",
+    class %in% c("FIB", "MES", "VSMC") ~ "STROMAL",
+    class == "IMMUNE" ~ "IMMUNE",
+  ))
+
+type_order <- c("EPITHELIAL", "ENDOTHELIAL", "STROMAL", "IMMUNE")
+seurat.obj.f_cleaned@meta.data$type <- factor(seurat.obj.f_cleaned@meta.data$type, levels = type_order)
+
+DimPlot(seurat.obj.f_cleaned, group.by = "type", label = TRUE, label.size = 4) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ggtitle(paste0("Type Annotation for ", kidney1))
+```
+### Note: Absence of immune cells?
+
+```{r}
+type_order <- c("EPITHELIAL", "ENDOTHELIAL", "STROMAL", "IMMUNE")
+seurat.obj.f_cleaned@meta.data$type <- factor(seurat.obj.f_cleaned@meta.data$type, levels = type_order)
+
+markers.to.plot3 <- c("Ank3",         # PTS1, PTS2, PTS3, DTL, TAL1, TAL2, MD, DCT1, DCT2, CNT, PC, ICA, ICB, PODO, PEC, URO
+                      "Flt1",         # EC
+                      "Pdgfrb",       # FIB, MES, VSMC
+                      "Ptprc"         # LYMPHO, MACRO
+)
+
+DotPlot(seurat.obj.f_cleaned,
+features = markers.to.plot3,
+group.by = "type",
+dot.scale = 8,
+dot.min = 0,
+scale.max = 100,
+scale.min = 0,
+col.min = -2.5,
+col.max = 2.5) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  coord_flip() +
+  labs(x = "Gene Features", y = "Clusters") +  
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ggtitle(paste0("Type Annotation for ", kidney1))
+```
+
+# Proportion Plots
+```{r}
+t1 <- table(seurat.obj.f_cleaned@meta.data$subclass)
+#t1
+
+prop.t1 <- prop.table(t1) 
+#prop.t1
+
+t2 <- as.data.frame(t1)
+colnames(t2) <- c('Cell_type', 'Frequency')
+
+# Original plot
+
+f1a <- ggplot(t2, aes(fill=Cell_type, y=Frequency, x=1)) + 
+  geom_bar(position="fill", stat = "identity", fun.y = "mean", colour="black") +
+  theme_classic() +
+  theme(axis.line = element_line(size = 1, colour = "black"),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        text = element_text(size=20),
+        axis.line.x = element_blank()) +
+  labs(fill = "Cell Type") +
+  xlab(NULL) + ggtitle("Subclass")
+
+t1 <- table(seurat.obj.f_cleaned@meta.data$class)
+#t1
+
+prop.t1 <- prop.table(t1) 
+#prop.t1
+
+t2 <- as.data.frame(t1)
+colnames(t2) <- c('Cell_type', 'Frequency')
+
+# Original plot
+
+f1b <- ggplot(t2, aes(fill=Cell_type, y=Frequency, x=1)) + 
+  geom_bar(position="fill", stat = "identity", fun.y = "mean", colour="black") +
+  theme_classic() +
+  theme(axis.line = element_line(size = 1, colour = "black"),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        text = element_text(size=20),
+        axis.line.x = element_blank()) +
+  labs(fill = "Cell Type") +
+  xlab(NULL) + ggtitle("Class")
+
+t1 <- table(seurat.obj.f_cleaned@meta.data$type)
+#t1
+
+prop.t1 <- prop.table(t1) 
+#prop.t1
+
+t2 <- as.data.frame(t1)
+colnames(t2) <- c('Cell_type', 'Frequency')
+
+# Original plot
+
+f1c <- ggplot(t2, aes(fill = Cell_type, y = Frequency, x = 1)) + 
+  geom_bar(position = "fill", stat = "identity", colour = "black") +
+  theme_classic() +
+  theme(
+    axis.line = element_line(size = 1, colour = "black"),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    text = element_text(size = 20),
+    axis.line.x = element_blank()
+  ) +
+  labs(fill = "Cell Type") +
+  xlab(NULL) +
+  ggtitle("Type")
+
+
+f1a + f1b +f1c
+```
+### Note: How do I get this to look like the manual? Each bar seems to take up the same amount of space
+
+# QC Reports: Filtering Progression Sankey Plot
+
+```{r}
+Start_name <- paste0(as.character(Start), " cells")
+Filter_1_name <- paste0(as.character(Filter_1), " cells")
+Filter_2_name <- paste0(as.character(Filter_2), " cells")
+Filter_3_name <- paste0(as.character(Filter_3), " cells")
+
+
+df_paths2 <- data.frame(
+  group = c("Pass_All", "Filtered_at_3", "Filtered_at_2", "Filtered_at_1"),
+  CellRanger = c(Start_name,     Start_name,       Start_name,        Start_name),
+  nFeature = c(Filter_1_name,  Filter_1_name,    Filter_1_name,     paste0(as.character(Start-Filter_1), " cells removed")),
+  doubletFinder = c(Filter_2_name,  Filter_2_name,   paste0(as.character(Filter_1-Filter_2), " cells removed"),    NA),
+  ManualDoublets = c(Filter_3_name, paste0(as.character(Filter_2-Filter_3), " cells removed"),      NA,       NA),
+  value = c(Start,        Filter_2-Filter_3,          Filter_1-Filter_2,           Start-Filter_1)
+)
+
+
+df_paths2b <- data.frame(
+  group = c("Pass_All", "Filtered_at_3", "Filtered_at_2", "Filtered_at_1"),
+  CellRanger = c(Start_name, Start_name, Start_name, Start_name),
+  nFeature = c(Filter_1_name, Filter_1_name, Filter_1_name, paste0(as.character(Start - Filter_1), " cells removed")),
+  doubletFinder = c(Filter_2_name, Filter_2_name, paste0(as.character(Filter_1 - Filter_2), " cells removed"), NA),
+  ManualDoublets = c(Filter_3_name, paste0(as.character(Filter_2 - Filter_3), " cells removed"), NA, NA),
+  Final = c(Filter_3_name , NA, NA, NA),
+  value = c(Start, Filter_2 - Filter_3, Filter_1 - Filter_2, Start - Filter_1)
+)
+
+# Convert to long format suitable for ggsankey
+df_sankey <- df_paths2b   %>%
+  make_long(CellRanger, nFeature, doubletFinder, ManualDoublets, Final, value = "value")
+
+# make removed nodes gray
+orig_levels <- levels(factor(df_sankey$node))
+orig_palette <- scales::hue_pal()(length(orig_levels))
+names(orig_palette) <- orig_levels
+
+# Override only "removed" nodes to gray
+custom_palette <- orig_palette
+custom_palette[grepl("removed", names(custom_palette))] <- "gray"
+
+# change font size of removed nodes
+df_sankey <- df_sankey %>%
+  filter(!is.na(node))%>%
+  mutate(is_removed = grepl("removed", node),
+         label_size = ifelse(is_removed, 3, 4))
+
+# specify order
+df_sankey$node <- factor(df_sankey$node, levels = rev(unique(df_sankey$node)))
+df_sankey$next_node <- factor(df_sankey$next_node, levels = rev(unique(df_sankey$node)))
+
+# Do the same for next_node
+df_sankey$next_node <- factor(df_sankey$next_node, levels = levels(df_sankey$node))
+
+
+# Plot
+ggplot(df_sankey, aes(x = x,
+                      next_x = next_x,
+                      node = node,
+                      next_node = next_node,
+                      value = value,
+                      fill = factor(node))) +
+  geom_sankey(flow.alpha = 0.7, node.color = "black") +
+  geom_sankey_label(aes(label = node, size = label_size), color = "white", show.legend = FALSE) +
+  scale_fill_manual(values = custom_palette) +   
+  scale_color_identity() +
+  scale_size_identity() +
+  theme_classic() +
+labs(
+  title = paste0("Filtering Progression Sankey Plot for ", kidney1),
+  x = ""
+) +
+  theme(
+    # Remove Y-axis
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.line.y = element_blank(),
+    axis.title.y = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank(),
+
+    # Remove X-axis lines
+    axis.line.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+
+    # Enlarge text
+    axis.text.x = element_text(size = 14),
+    axis.title.x = element_text(size = 16),
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+
+    # Hide legend
+    legend.position = "none"
+  )
+```
+
+# Subclass cell types that were not annotated
+```{r}
+list1 <- unique(seurat.obj.f_cleaned$subclass)
+  
+list2 <- unique(markers_long$Subclass)
+
+missing_subclass <- setdiff(list2, list1)
+
+missing_subclass
+```
+
+### TALA, MD, PEC, URO, LYMPH, MES, VSMC, LYMPHO, MACRO were not annotated in this sample
+
+### Note: Had trouble w/ saving Seurat object, will receive help in Jan 9th meeting
